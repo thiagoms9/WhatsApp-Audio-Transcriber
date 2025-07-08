@@ -1,0 +1,29 @@
+# Core dependencies
+openai-whisper
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# File handling
+python-magic-bin>=0.4.14  # For Windows
+# zipfile is built into Python
+
+# Audio processing
+pydub>=0.25.1
+librosa>=0.10.1
+
+# Text processing
+regex>=2023.10.3
+python-dateutil>=2.8.2
+
+# Web framework (for deployment)
+fastapi>=0.104.1
+uvicorn>=0.24.0
+python-multipart>=0.0.6
+
+# Utilities
+tqdm>=4.66.1
+loguru>=0.7.2
+# pathlib is built into Python 3.4+
+
+# Optional: Faster Whisper (alternative)
+# faster-whisper>=0.9.0
