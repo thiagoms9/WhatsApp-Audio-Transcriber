@@ -1,0 +1,22 @@
+[variables]
+# Increase build timeout and optimize Python
+NIXPACKS_BUILD_TIMEOUT = "1800"  # 30 minutes
+PIP_NO_CACHE_DIR = "1"
+PIP_DISABLE_PIP_VERSION_CHECK = "1"
+PYTHONUNBUFFERED = "1"
+
+[phases.setup]
+nixPkgs = ["python39", "ffmpeg", "git"]
+
+[phases.install]
+dependsOn = ["setup"]
+cmds = [
+    "pip install --upgrade pip",
+    "pip install --no-cache-dir -r requirements.txt"
+]
+
+[phases.build]
+dependsOn = ["install"]
+
+[start]
+cmd = "python web_app.py"
