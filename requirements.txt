@@ -1,11 +1,8 @@
-# Core dependencies
-openai-whisper
-torch>=2.0.0
-torchaudio>=2.0.0
+# Use faster-whisper instead of openai-whisper (much smaller and faster!)
+faster-whisper>=0.9.0
 
-# Audio processing
+# Minimal audio processing
 pydub>=0.25.1
-librosa>=0.10.1
 
 # Text processing
 regex>=2023.10.3
@@ -19,7 +16,6 @@ python-multipart>=0.0.6
 # Utilities
 tqdm>=4.66.1
 loguru>=0.7.2
-# pathlib is built into Python 3.4+
 
-# Optional: Faster Whisper (alternative)
-# faster-whisper>=0.9.0
+# Note: faster-whisper is much smaller than openai-whisper + torch
+# It uses CPU inference and is specifically optimized for production

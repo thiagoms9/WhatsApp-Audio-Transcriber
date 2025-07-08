@@ -1,6 +1,6 @@
 """
-Audio transcription module using OpenAI Whisper
-Handles transcription of matched audio files
+Audio transcription module using faster-whisper (optimized for production)
+Handles transcription of matched audio files with smaller memory footprint
 """
 
 import os
@@ -13,13 +13,13 @@ import tempfile
 from loguru import logger
 from tqdm import tqdm
 
-# Import Whisper
+# Import faster-whisper instead of openai-whisper
 try:
-    import whisper
+    from faster_whisper import WhisperModel
     WHISPER_AVAILABLE = True
 except ImportError:
     WHISPER_AVAILABLE = False
-    logger.warning("Whisper not available - transcription will be disabled")
+    logger.warning("faster-whisper not available - transcription will be disabled")
 
 from config import WHISPER_MODEL, WHISPER_LANGUAGE, WHISPER_TASK
 
@@ -40,7 +40,7 @@ class TranscriptionResult:
 
 
 class AudioTranscriber:
-    """Transcribe audio files using OpenAI Whisper with enhanced settings"""
+    """Transcribe audio files using faster-whisper with enhanced settings"""
     
     def __init__(self, model_name: str = WHISPER_MODEL, language: str = WHISPER_LANGUAGE, 
                  enable_preprocessing: bool = True, enable_postprocessing: bool = True):
@@ -52,18 +52,19 @@ class AudioTranscriber:
         self.transcription_results: List[TranscriptionResult] = []
         
     def load_model(self) -> bool:
-        """Load the Whisper model"""
+        """Load the faster-whisper model"""
         if not WHISPER_AVAILABLE:
-            logger.error("Whisper is not available. Please install it with: pip install openai-whisper")
+            logger.error("faster-whisper is not available. Please install it with: pip install faster-whisper")
             return False
         
         try:
-            logger.info(f"Loading Whisper model: {self.model_name}")
-            self.model = whisper.load_model(self.model_name)
-            logger.info("✅ Whisper model loaded successfully")
+            logger.info(f"Loading faster-whisper model: {self.model_name}")
+            # faster-whisper uses CPU by default, which is much smaller
+            self.model = WhisperModel(self.model_name, device="cpu", compute_type="int8")
+            logger.info("✅ faster-whisper model loaded successfully")
             return True
         except Exception as e:
-            logger.error(f"Failed to load Whisper model: {e}")
+            logger.error(f"Failed to load faster-whisper model: {e}")
             return False
     
     def transcribe_queue(self, transcription_queue: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -80,7 +81,7 @@ class AudioTranscriber:
             if not self.load_model():
                 return {
                     "success": False,
-                    "error": "Could not load Whisper model",
+                    "error": "Could not load faster-whisper model",
                     "results": []
                 }
         
@@ -144,7 +145,7 @@ class AudioTranscriber:
         }
     
     def _transcribe_single_file(self, audio_file_path: str, chat_index: int, chat_message: Dict) -> TranscriptionResult:
-        """Transcribe a single audio file with enhanced settings"""
+        """Transcribe a single audio file with faster-whisper"""
         
         start_time = time.time()
         
@@ -160,52 +161,48 @@ class AudioTranscriber:
             
             logger.debug(f"Transcribing {Path(audio_file_path).name} ({file_size} bytes)")
             
-            # Enhanced transcription options
-            options = {
-                "task": WHISPER_TASK,
-                "fp16": False,  # Use FP32 for better compatibility
-                "temperature": 0.0,  # More deterministic results
-                "best_of": 5,  # Try multiple decoding attempts
-                "beam_size": 5,  # Use beam search for better accuracy
-                "patience": 1.0,  # Patience for beam search
-                "length_penalty": 1.0,  # Length penalty for beam search
-                "suppress_tokens": "-1",  # Suppress silence tokens
-                "initial_prompt": self._get_context_prompt(chat_message),  # Context from chat
-                "condition_on_previous_text": True,  # Use previous text as context
-                "compression_ratio_threshold": 2.4,  # Detect repetitive text
-                "logprob_threshold": -1.0,  # Filter low-probability words
-                "no_speech_threshold": 0.6,  # Detect silence
-            }
+            # Transcribe with faster-whisper
+            segments, info = self.model.transcribe(
+                audio_file_path,
+                language=self.language,
+                task=WHISPER_TASK,
+                beam_size=5,
+                best_of=5,
+                temperature=0.0,
+                condition_on_previous_text=True,
+                initial_prompt=self._get_context_prompt(chat_message),
+                compression_ratio_threshold=2.4,
+                log_prob_threshold=-1.0,
+                no_speech_threshold=0.6,
+                word_timestamps=False  # Disable for faster processing
+            )
             
-            # Add language if specified
-            if self.language:
-                options["language"] = self.language
-                logger.debug(f"Using specified language: {self.language}")
+            # Extract transcription text from segments
+            transcription_text = ""
+            segment_confidences = []
             
-            # Perform transcription with error recovery
-            try:
-                whisper_result = self.model.transcribe(audio_file_path, **options)
-            except Exception as e:
-                # Fallback with simpler options if advanced options fail
-                logger.warning(f"Advanced transcription failed, trying fallback: {e}")
-                simple_options = {"task": WHISPER_TASK, "fp16": False}
-                if self.language:
-                    simple_options["language"] = self.language
-                whisper_result = self.model.transcribe(audio_file_path, **simple_options)
+            for segment in segments:
+                transcription_text += segment.text + " "
+                # faster-whisper provides avg_logprob per segment
+                if hasattr(segment, 'avg_logprob'):
+                    segment_confidences.append(segment.avg_logprob)
             
-            # Extract and process results
-            transcription_text = whisper_result["text"].strip()
-            detected_language = whisper_result.get("language", "unknown")
+            transcription_text = transcription_text.strip()
             
             # Post-process transcription if enabled
             if self.enable_postprocessing:
-                transcription_text = self._postprocess_text(transcription_text, detected_language)
+                transcription_text = self._postprocess_text(transcription_text, info.language)
             
-            # Calculate enhanced confidence
-            confidence = self._calculate_enhanced_confidence(whisper_result)
+            # Calculate confidence from segment avg_logprobs
+            if segment_confidences:
+                avg_logprob = sum(segment_confidences) / len(segment_confidences)
+                confidence = max(0.0, min(1.0, (avg_logprob + 1.0)))
+            else:
+                confidence = 0.7  # Default confidence
             
-            # Get duration from segments if available
-            duration = self._extract_duration(whisper_result)
+            # Get duration from info
+            duration = info.duration if hasattr(info, 'duration') else 0.0
+            detected_language = info.language if hasattr(info, 'language') else "unknown"
             
             processing_time = time.time() - start_time
             
@@ -306,53 +303,6 @@ class AudioTranscriber:
         
         return text.strip()
     
-    def _calculate_enhanced_confidence(self, whisper_result: Dict) -> float:
-        """Calculate enhanced confidence score"""
-        try:
-            # Use multiple factors for confidence
-            factors = []
-            
-            # Factor 1: Average log probability
-            if "segments" in whisper_result:
-                segments = whisper_result["segments"]
-                if segments:
-                    avg_logprob = sum(seg.get("avg_logprob", -1.0) for seg in segments) / len(segments)
-                    prob_confidence = max(0.0, min(1.0, (avg_logprob + 1.0)))
-                    factors.append(prob_confidence)
-            
-            # Factor 2: No speech probability (lower is better)
-            no_speech_prob = whisper_result.get("no_speech_prob", 0.5)
-            speech_confidence = 1.0 - no_speech_prob
-            factors.append(speech_confidence)
-            
-            # Factor 3: Text length and content quality
-            text = whisper_result.get("text", "").strip()
-            if text:
-                # Longer, more coherent text generally indicates better transcription
-                length_factor = min(1.0, len(text) / 100)  # Normalize by expected length
-                content_factor = 1.0 if re.search(r'[a-zA-Z]', text) else 0.3  # Penalize non-alphabetic
-                factors.extend([length_factor, content_factor])
-            
-            # Calculate weighted average
-            if factors:
-                return sum(factors) / len(factors)
-            else:
-                return 0.7  # Default confidence
-                
-        except Exception:
-            return 0.7  # Default confidence
-    
-    def _extract_duration(self, whisper_result: Dict) -> float:
-        """Extract audio duration from Whisper result"""
-        try:
-            if "segments" in whisper_result:
-                segments = whisper_result["segments"]
-                if segments:
-                    return segments[-1].get("end", 0.0)
-            return 0.0
-        except:
-            return 0.0
-    
     def _create_error_result(self, audio_file_path: str, chat_index: int, chat_message: Dict, 
                            error_msg: str, processing_time: float = 0.0) -> TranscriptionResult:
         """Create an error result"""
@@ -368,33 +318,6 @@ class AudioTranscriber:
             error_message=error_msg,
             processing_time_seconds=processing_time
         )
-    
-    def _estimate_confidence(self, whisper_result: Dict) -> float:
-        """Estimate confidence from Whisper result"""
-        try:
-            # Use average log probability from segments if available
-            if "segments" in whisper_result:
-                segments = whisper_result["segments"]
-                if segments:
-                    # Average the log probabilities and convert to confidence
-                    avg_logprob = sum(seg.get("avg_logprob", -1.0) for seg in segments) / len(segments)
-                    # Convert log probability to confidence (rough estimation)
-                    confidence = max(0.0, min(1.0, (avg_logprob + 1.0)))
-                    return confidence
-            
-            # Fallback: estimate based on text length and content
-            text = whisper_result.get("text", "").strip()
-            if not text:
-                return 0.0
-            elif len(text) < 3:
-                return 0.3
-            elif "[" in text or "]" in text:  # Whisper uncertainty markers
-                return 0.5
-            else:
-                return 0.8
-                
-        except Exception:
-            return 0.7  # Default confidence
     
     def get_transcription_summary(self) -> Dict[str, Any]:
         """Get a summary of all transcription results"""
@@ -468,7 +391,7 @@ def transcribe_audio_files(transcription_queue: List[Dict[str, Any]],
 # Test function
 if __name__ == "__main__":
     if not WHISPER_AVAILABLE:
-        print("❌ Whisper not available. Please install it with: pip install openai-whisper")
+        print("❌ faster-whisper not available. Please install it with: pip install faster-whisper")
     else:
-        print("✅ Whisper is available")
+        print("✅ faster-whisper is available")
         print("Audio Transcriber module - run via test_transcriber.py")
